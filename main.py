@@ -1,7 +1,7 @@
 import os
 import urllib.parse
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from fastapi import FastAPI, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import create_engine, Column, Integer, String
@@ -21,9 +21,9 @@ class MatchDB(Base):
     __tablename__ = "matches"
     id = Column(Integer, primary_key=True, index=True)
     team1 = Column(String, index=True)
-    score1 = Column(Integer)
+    score1 = Column(Integer, nullable=True)  # Strictly nullable now
     team2 = Column(String)
-    score2 = Column(Integer)
+    score2 = Column(Integer, nullable=True)  # Strictly nullable now
     status = Column(String)
     utc_date = Column(String)
     stage = Column(String)
@@ -49,27 +49,31 @@ def get_db():
     finally:
         db.close()
 
-# --- Football API Integration (Scores) ---
+# --- Football API Integration (Scores & Auto-Sync) ---
 FOOTBALL_API_KEY = "5cd9e16068fe417b9815290010d55d87" 
+LAST_SYNC_TIME = None
 
-@app.post("/api/sync")
-def sync_live_matches(db: Session = Depends(get_db)):
+def perform_sync(db: Session):
+    """Internal helper to safely sync with the football API."""
     headers = { 'X-Auth-Token': FOOTBALL_API_KEY }
-    response = requests.get('http://api.football-data.org/v4/competitions/WC/matches', headers=headers)
+    # Secure HTTPS endpoint
+    response = requests.get('https://api.football-data.org/v4/competitions/WC/matches', headers=headers)
     
     if response.status_code != 200:
-        return {"error": "Failed to fetch from API", "details": response.json()}
+        raise Exception(f"Failed to fetch from API: {response.text}")
         
     data = response.json()
     matches = data.get('matches', [])
     
+    # Wipe old records
     db.query(MatchDB).delete()
     
     matches_added = 0
     for match in matches: 
         score = match.get('score', {}).get('fullTime', {})
-        home_score = score.get('home') if score.get('home') is not None else 0
-        away_score = score.get('away') if score.get('away') is not None else 0
+        # Do not default unplayed scores to 0 so the AI context is clean
+        home_score = score.get('home')
+        away_score = score.get('away')
         
         home_team = match.get('homeTeam', {})
         away_team = match.get('awayTeam', {})
@@ -89,10 +93,34 @@ def sync_live_matches(db: Session = Depends(get_db)):
         matches_added += 1
         
     db.commit()
-    return {"message": f"Successfully synced {matches_added} matches!"}
+    return matches_added
+
+@app.post("/api/sync")
+def sync_live_matches(db: Session = Depends(get_db)):
+    try:
+        global LAST_SYNC_TIME
+        matches_added = perform_sync(db)
+        LAST_SYNC_TIME = datetime.utcnow()
+        return {"message": f"Successfully synced {matches_added} matches!"}
+    except Exception as e:
+        return {"error": "Failed to manually sync", "details": str(e)}
 
 @app.get("/api/matches")
 def get_matches(db: Session = Depends(get_db)):
+    global LAST_SYNC_TIME
+    now = datetime.utcnow()
+    
+    # Trigger auto-sync if DB is empty or last sync was more than 10 minutes ago
+    db_empty = db.query(MatchDB).count() == 0
+    time_to_sync = LAST_SYNC_TIME is None or (now - LAST_SYNC_TIME) > timedelta(minutes=10)
+    
+    if db_empty or time_to_sync:
+        try:
+            perform_sync(db)
+            LAST_SYNC_TIME = now
+        except Exception as e:
+            print(f"Auto-sync background task failed: {e}")
+            
     return db.query(MatchDB).all()
 
 
@@ -113,6 +141,7 @@ def scrape_match_data_playwright(team1: str, team2: str, utc_date: str, existing
             current_id = existing_id
             
             if not current_id:
+                # Step 1: Search for team1 to find its Sofascore entity ID
                 encoded_query = urllib.parse.quote(team1)
                 search_url = f"https://api.sofascore.com/api/v1/search/all?q={encoded_query}&page=0"
                 
@@ -126,6 +155,7 @@ def scrape_match_data_playwright(team1: str, team2: str, utc_date: str, existing
                         team_id = str(result.get('entity', {}).get('id'))
                         break
                 
+                # Step 2: Query fixtures and filter by date alignment to find the exact target match
                 if team_id:
                     events_urls = [
                         f"https://api.sofascore.com/api/v1/team/{team_id}/events/last/0",
@@ -247,16 +277,17 @@ GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
 
 @app.post("/api/chat")
 def chat_with_ai(request: ChatRequest, db: Session = Depends(get_db)):
-    # 1. Fetch live match data from your synchronized database
     db_matches = db.query(MatchDB).all()
     
-    # 2. Build a comprehensive string context describing the current state of the tournament
+    # Build clean context strings
     tournament_context = "CURRENT LIVE 2026 WORLD CUP DATABASE MATCH CONTEXT:\n"
     if not db_matches:
         tournament_context += "No match data synchronized in database yet.\n"
     else:
         for m in db_matches:
-            tournament_context += f"- Stage: {m.stage} | Match: {m.team1} vs {m.team2} | Score: {m.score1}-{m.score2} | Status: {m.status}\n"
+            # Format score to display Not Played if null so the LLM doesn't hallucinate 0-0 finishes
+            score_str = f"{m.score1}-{m.score2}" if (m.score1 is not None and m.score2 is not None) else "Not Played Yet"
+            tournament_context += f"- Stage: {m.stage} | Match: {m.team1} vs {m.team2} | Score: {score_str} | Status: {m.status}\n"
 
     headers = {
         "Authorization": f"Bearer {GROQ_API_KEY}",
