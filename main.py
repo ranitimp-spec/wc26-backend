@@ -36,7 +36,7 @@ app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
     # Added https:// here! (And make sure there is no trailing slash at the end)
-    allow_origins=["https://wc26-gvt9ujk36-ranitimp-9673s-projects.vercel.app"],
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
