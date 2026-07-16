@@ -114,18 +114,45 @@ def scrape_match_data_playwright(team1: str, team2: str, existing_id: str = None
             current_id = existing_id
             
             if not current_id:
-                search_query = f"{team1} {team2}"
-                encoded_query = urllib.parse.quote(search_query)
+                # Step 1: Search for team1 to find its Sofascore entity ID
+                encoded_query = urllib.parse.quote(team1)
                 search_url = f"https://api.sofascore.com/api/v1/search/all?q={encoded_query}&page=0"
                 
                 page.goto(search_url)
                 content = page.locator("body").inner_text()
-                data = json.loads(content)
+                search_data = json.loads(content)
                 
-                for result in data.get('results', []):
-                    if result.get('type') == 'event':
-                        current_id = str(result.get('entity', {}).get('id'))
+                team_id = None
+                for result in search_data.get('results', []):
+                    if result.get('type') == 'team':
+                        team_id = str(result.get('entity', {}).get('id'))
                         break
+                
+                # Step 2: Query team1's recent and upcoming fixtures to find the opponent match (team2)
+                if team_id:
+                    events_urls = [
+                        f"https://api.sofascore.com/api/v1/team/{team_id}/events/last/0",
+                        f"https://api.sofascore.com/api/v1/team/{team_id}/events/next/0"
+                    ]
+                    
+                    for url in events_urls:
+                        try:
+                            page.goto(url)
+                            events_content = page.locator("body").inner_text()
+                            events_data = json.loads(events_content)
+                            
+                            for event in events_data.get('events', []):
+                                home_name = event.get('homeTeam', {}).get('name', '').lower()
+                                away_name = event.get('awayTeam', {}).get('name', '').lower()
+                                
+                                # Use fuzzy logic to see if team2 is in either side of the matchup
+                                if team2.lower() in home_name or team2.lower() in away_name:
+                                    current_id = str(event.get('id'))
+                                    break
+                            if current_id:
+                                break
+                        except Exception:
+                            continue  # Fallback to next endpoint if one fails
             
             if not current_id:
                 return None, {"error": True, "message": f"Headless browser could not find a match ID for {team1} vs {team2}."}
