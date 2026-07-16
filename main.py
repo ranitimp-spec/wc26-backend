@@ -118,7 +118,7 @@ def get_matches(db: Session = Depends(get_db)):
     return db.query(MatchDB).all()
 
 
-# --- DYNAMIC AI MATCH STATS ENGINE (Replaces Flaky Playwright Scraper) ---
+# --- DYNAMIC AI MATCH STATS ENGINE (With Strict 2026 Grounding) ---
 @app.get("/api/match-stats/{team1}/{team2}")
 def get_live_sofascore_stats(team1: str, team2: str, db: Session = Depends(get_db)):
     match = db.query(MatchDB).filter(
@@ -129,7 +129,6 @@ def get_live_sofascore_stats(team1: str, team2: str, db: Session = Depends(get_d
     if not match:
         return {"error": True, "message": "Match not found in local database."}
 
-    # Verify alignment of teams relative to route layout vs DB structure
     is_inverted = (match.team1 != team1)
     home_team = match.team1
     away_team = match.team2
@@ -145,13 +144,22 @@ def get_live_sofascore_stats(team1: str, team2: str, db: Session = Depends(get_d
         "Content-Type": "application/json"
     }
     
+    # Enforced 2026 timeline parameters with explicit whitelists & blacklists
     prompt = (
-        f"Generate highly realistic match statistics and goal details for a World Cup match where "
-        f"{home_team} played at home against {away_team} away. The final score was "
-        f"{home_team} {home_score} - {away_score} {away_team}. "
-        f"CRITICAL: The goals array must contain EXACTLY {home_score} goal(s) allocated to players from {home_team} "
-        f"and EXACTLY {away_score} goal(s) allocated to players from {away_team}. Use highly plausible real-world "
-        f"player names from both national squads and realistic minute timestamps."
+        f"It is the current year 2026. Generate a highly realistic tactical match statistics profile and goal events "
+        f"for a 2026 World Cup fixture where {home_team} played at home against {away_team} away. "
+        f"The verified final score line was: {home_team} {home_score} - {away_score} {away_team}. "
+        f"\n\nCRITICAL TIMELINE CONSTRAINTS:\n"
+        f"1. The goals array object MUST contain EXACTLY {home_score} goal(s) scored by current, active 2026 roster players from {home_team} "
+        f"and EXACTLY {away_score} goal(s) scored by current, active 2026 roster players from {away_team}.\n"
+        f"2. ABSOLUTELY FORBIDDEN: Do not use any players who retired from international football prior to 2026. For example, "
+        f"Angel Di Maria, Eden Hazard, Toni Kroos, Gareth Bale, and Thiago Silva are STRICTLY FORBIDDEN.\n"
+        f"3. ROSTER ANCHORS: Only pick from highly plausible active elite players. For example:\n"
+        f"   - Argentina: Lionel Messi, Julián Álvarez, Lautaro Martínez, Alexis Mac Allister, Enzo Fernández, Alejandro Garnacho, Rodrigo De Paul.\n"
+        f"   - England: Harry Kane, Jude Bellingham, Bukayo Saka, Phil Foden, Cole Palmer, Ollie Watkins, Declan Rice.\n"
+        f"   - France: Kylian Mbappé, Marcus Thuram, Ousmane Dembélé, Bradley Barcola, Antoine Griezmann.\n"
+        f"   - Spain: Lamine Yamal, Nico Williams, Dani Olmo, Álvaro Morata, Pedri, Gavi.\n"
+        f"Ensure all simulated metrics (possession splits, xG values, shot counts, and POTM) match the intensity of this specific scoreline."
     )
 
     payload = {
@@ -161,9 +169,9 @@ def get_live_sofascore_stats(team1: str, team2: str, db: Session = Depends(get_d
             {
                 "role": "system",
                 "content": (
-                    "You are a professional football analytics data simulation engine. Generate deep, highly "
-                    "realistic statistical profiles for completed matches matching the real score precisely. "
-                    "You must output ONLY a raw JSON object matching this structural schema shape:\n"
+                    "You are an elite, highly precise football analytics data engine. Your sole purpose is to synthesize "
+                    "incredibly authentic statistical summaries for completed matches. You must output exclusively a valid "
+                    "JSON object matching this strict layout with no markdown formatting tags, explanation text, or extra characters:\n"
                     "{\n"
                     "  \"possession\": {\"home\": 52, \"away\": 48},\n"
                     "  \"xg\": {\"home\": \"1.42\", \"away\": \"1.10\"},\n"
@@ -172,8 +180,7 @@ def get_live_sofascore_stats(team1: str, team2: str, db: Session = Depends(get_d
                     "  \"chances_created\": {\"home\": 2, \"away\": 2},\n"
                     "  \"potm\": \"Player Name\",\n"
                     "  \"goals\": [{\"player\": \"Player Name\", \"time\": 42}]\n"
-                    "}\n"
-                    "Do not include any chat formatting, explanations, markdown ticks, or text surrounding the JSON."
+                    "}"
                 )
             },
             {
@@ -189,7 +196,6 @@ def get_live_sofascore_stats(team1: str, team2: str, db: Session = Depends(get_d
             ai_data = response.json()
             stats_json = json.loads(ai_data["choices"][0]["message"]["content"])
             
-            # If the user opened the stats from an inverted perspective, map values smoothly
             if is_inverted:
                 swapped_stats = {
                     "possession": {"home": stats_json["possession"]["away"], "away": stats_json["possession"]["home"]},
