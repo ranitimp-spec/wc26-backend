@@ -1,6 +1,7 @@
 import os
 import urllib.parse
 import json
+from datetime import datetime
 from fastapi import FastAPI, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import create_engine, Column, Integer, String
@@ -96,9 +97,8 @@ def get_matches(db: Session = Depends(get_db)):
 
 
 # --- AUTOMATED PLAYWRIGHT SCRAPERS (Deep Match Stats) ---
-def scrape_match_data_playwright(team1: str, team2: str, existing_id: str = None):
+def scrape_match_data_playwright(team1: str, team2: str, utc_date: str, existing_id: str = None):
     with sync_playwright() as p:
-        # CRITICAL FIX: headless=False forces a real browser window to bypass Cloudflare
         # STEALTH HEADLESS: Runs invisibly but hides the bot flags from Cloudflare
         browser = p.chromium.launch(
             headless=True,
@@ -128,7 +128,7 @@ def scrape_match_data_playwright(team1: str, team2: str, existing_id: str = None
                         team_id = str(result.get('entity', {}).get('id'))
                         break
                 
-                # Step 2: Query team1's recent and upcoming fixtures to find the opponent match (team2)
+                # Step 2: Query fixtures and filter by date alignment to find the exact target match
                 if team_id:
                     events_urls = [
                         f"https://api.sofascore.com/api/v1/team/{team_id}/events/last/0",
@@ -145,14 +145,21 @@ def scrape_match_data_playwright(team1: str, team2: str, existing_id: str = None
                                 home_name = event.get('homeTeam', {}).get('name', '').lower()
                                 away_name = event.get('awayTeam', {}).get('name', '').lower()
                                 
-                                # Use fuzzy logic to see if team2 is in either side of the matchup
+                                # Verify team composition matches
                                 if team2.lower() in home_name or team2.lower() in away_name:
-                                    current_id = str(event.get('id'))
-                                    break
+                                    # Validate date proximity (within 1 day tolerance for timezones)
+                                    start_timestamp = event.get('startTimestamp')
+                                    if start_timestamp and utc_date:
+                                        sofa_date = datetime.fromtimestamp(start_timestamp).date()
+                                        db_date = datetime.strptime(utc_date[:10], "%Y-%m-%d").date()
+                                        
+                                        if abs((sofa_date - db_date).days) <= 1:
+                                            current_id = str(event.get('id'))
+                                            break
                             if current_id:
                                 break
                         except Exception:
-                            continue  # Fallback to next endpoint if one fails
+                            continue 
             
             if not current_id:
                 return None, {"error": True, "message": f"Headless browser could not find a match ID for {team1} vs {team2}."}
@@ -182,7 +189,8 @@ def get_live_sofascore_stats(team1: str, team2: str, db: Session = Depends(get_d
     if not match:
         return {"error": True, "message": "Match not found in local database."}
 
-    new_id, scraped_data = scrape_match_data_playwright(team1, team2, match.sofascore_id)
+    # Added match.utc_date down to the scraper function for strict scheduling evaluation
+    new_id, scraped_data = scrape_match_data_playwright(team1, team2, match.utc_date, match.sofascore_id)
     
     if scraped_data.get('error'):
         return scraped_data
@@ -241,7 +249,6 @@ def get_live_sofascore_stats(team1: str, team2: str, db: Session = Depends(get_d
 class ChatRequest(BaseModel):
     message: str
 
-# TODO: PASTE YOUR REAL GROQ API KEY HERE!
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
 
 @app.post("/api/chat")
