@@ -26,9 +26,8 @@ class MatchDB(Base):
     status = Column(String)
     utc_date = Column(String)
     stage = Column(String)
+    sofascore_id = Column(String, nullable=True) 
 
-# Automatically drops and recreates tables to prevent database lockups on Render
-Base.metadata.drop_all(bind=engine)
 Base.metadata.create_all(bind=engine)
 
 # --- FastAPI Setup ---
@@ -49,7 +48,7 @@ def get_db():
     finally:
         db.close()
 
-# --- Football API Integration (Live Scores Sync) ---
+# --- Football API Integration (Scores & Auto-Sync) ---
 FOOTBALL_API_KEY = "5cd9e16068fe417b9815290010d55d87" 
 LAST_SYNC_TIME = None
 
@@ -119,7 +118,7 @@ def get_matches(db: Session = Depends(get_db)):
     return db.query(MatchDB).all()
 
 
-# --- DYNAMIC DUAL-ENGINE: SIMULATED STATS + REAL GOALSCORERS ---
+# --- STABLE HYBRID ENGINE: SIMULATED STATS + DYNAMIC REAL GOALSCORERS ---
 @app.get("/api/match-stats/{team1}/{team2}")
 def get_real_match_stats(team1: str, team2: str, db: Session = Depends(get_db)):
     match = db.query(MatchDB).filter(
@@ -133,73 +132,99 @@ def get_real_match_stats(team1: str, team2: str, db: Session = Depends(get_db)):
     home_score = match.score1 if match.score1 is not None else 0
     away_score = match.score2 if match.score2 is not None else 0
 
-    # Base configuration for dynamic player names
     real_goals = []
     detected_potm = "Match MVP"
     
-    # HTTP header context to ensure smooth delivery from cloud instances
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
     }
 
-    # DYNAMIC ENGINE: Pull the live tournament feed to fetch genuine goalscorers
+    # 1. Parse date context window to safely balance international timezone rolls
     try:
-        # 42 is the global index mapping for the World Cup tournament timeline
-        tournament_url = "https://www.fotmob.com/api/leagues?id=42"
-        resp = requests.get(tournament_url, headers=headers, timeout=5)
-        
-        if resp.status_code == 200:
-            data = resp.json()
-            fotmob_id = None
+        match_date = datetime.strptime(match.utc_date[:10], "%Y-%m-%d")
+        dates_to_check = [
+            (match_date - timedelta(days=1)).strftime("%Y%m%d"),
+            match_date.strftime("%Y%m%d"),
+            (match_date + timedelta(days=1)).strftime("%Y%m%d")
+        ]
+    except Exception:
+        dates_to_check = [datetime.utcnow().strftime("%Y%m%d")]
+
+    fotmob_id = match.sofascore_id
+    is_inverted = False
+
+    # 2. Dynamic Calendar Matrix Scan (Only loops if the ID isn't cached yet)
+    if not fotmob_id:
+        for target_date in dates_to_check:
+            try:
+                url = f"https://www.fotmob.com/api/matches?date={target_date}"
+                res = requests.get(url, headers=headers, timeout=5)
+                if res.status_code == 200:
+                    day_data = res.json()
+                    for league in day_data.get("leagues", []):
+                        for m in league.get("matches", []):
+                            h_name = m.get("home", {}).get("name", "").lower().strip()
+                            a_name = m.get("away", {}).get("name", "").lower().strip()
+                            t1_low = team1.lower().strip()
+                            t2_low = team2.lower().strip()
+                            
+                            if (t1_low in h_name or h_name in t1_low) and (t2_low in a_name or a_name in t2_low):
+                                fotmob_id = str(m.get("id"))
+                                is_inverted = False
+                                break
+                            elif (t2_low in h_name or h_name in t2_low) and (t1_low in a_name or a_name in t1_low):
+                                fotmob_id = str(m.get("id"))
+                                is_inverted = True
+                                break
+                    if fotmob_id:
+                        match.sofascore_id = fotmob_id
+                        db.commit()
+                        break
+            except Exception:
+                continue
+
+    # 3. Pull Genuine Scorer Timeline Details
+    if fotmob_id:
+        try:
+            details_url = f"https://www.fotmob.com/api/matchDetails?matchId={fotmob_id}"
+            details_resp = requests.get(details_url, headers=headers, timeout=5)
             
-            # Step 1: Scan the active tournament grid to extract the match ID
-            matches_data = data.get("matches", {}).get("allMatches", [])
-            for m in matches_data:
-                h_name = m.get("home", {}).get("name", "").lower()
-                a_name = m.get("away", {}).get("name", "").lower()
-                t1_low = team1.lower().strip()
-                t2_low = team2.lower().strip()
+            if details_resp.status_code == 200:
+                details_data = details_resp.json()
                 
-                if (t1_low in h_name or h_name in t1_low) and (t2_low in a_name or a_name in t2_low):
-                    fotmob_id = m.get("id")
-                    break
-                    
-            # Step 2: Query the dedicated match context layout to isolate goal events
-            if fotmob_id:
-                details_url = f"https://www.fotmob.com/api/matchDetails?matchId={fotmob_id}"
-                details_resp = requests.get(details_url, headers=headers, timeout=5)
-                
-                if details_resp.status_code == 200:
-                    details_data = details_resp.json()
-                    
-                    # Track official MVP selection
-                    top_players = details_data.get("content", {}).get("matchFacts", {}).get("topPlayers", {})
-                    h_potm = top_players.get("homePlayer", {}).get("name", "")
-                    a_potm = top_players.get("awayPlayer", {}).get("name", "")
-                    if h_potm or a_potm:
-                        detected_potm = h_potm if h_potm else a_potm
+                # Re-verify alignment structure perspective
+                h_check = details_data.get("header", {}).get("teams", [{}, {}])[0].get("name", "").lower().strip()
+                if team2.lower().strip() in h_check or h_check in team2.lower().strip():
+                    is_inverted = True
+
+                # Extract live player performance MVP metadata
+                top_players = details_data.get("content", {}).get("matchFacts", {}).get("topPlayers", {})
+                h_potm = top_players.get("homePlayer", {}).get("name", "")
+                a_potm = top_players.get("awayPlayer", {}).get("name", "")
+                if h_potm or a_potm:
+                    detected_potm = h_potm if h_potm else a_potm
                         
-                    # Extract active goal scorers list
-                    teams_header = details_data.get("header", {}).get("teams", [])
-                    for team_entry in teams_header:
-                        for goal in team_entry.get("goalEvents", []):
+                # Extract accurate goal scorer list
+                teams_header = details_data.get("header", {}).get("teams", [])
+                for team_entry in teams_header:
+                    for goal in team_entry.get("goalEvents", []):
+                        if not goal.get("isDisallowed", False):
                             real_goals.append({
                                 "player": goal.get("name", "Player"),
                                 "time": goal.get("time", 45)
                             })
-                    # Sort list chronologically
-                    real_goals = sorted(real_goals, key=lambda x: x["time"])
-    except Exception as e:
-        print(f"Dynamic goal logs fallback notice: {e}")
+                real_goals = sorted(real_goals, key=lambda x: x["time"])
+        except Exception as e:
+            print(f"Goal feed processing warning: {e}")
 
-    # Fallback to realistic templates if a match hasn't started or external network drops
+    # Fallback placeholder to maintain visual formatting if match hasn't started yet
     if not real_goals and (home_score > 0 or away_score > 0):
         for i in range(home_score):
             real_goals.append({"player": f"{team1} Scorer", "time": 20 + (i * 20)})
         for i in range(away_score):
             real_goals.append({"player": f"{team2} Scorer", "time": 30 + (i * 20)})
 
-    # MADE UP STATS ENGINE: Generated mathematically so it never returns an error
+    # MADE UP STATS ENGINE: Generated mathematically derived from results to ensure zero failures
     random.seed(home_score + away_score + len(team1))
     
     pos_h = max(38, min(62, 50 + (home_score - away_score) * 4 + random.randint(-2, 2)))
@@ -218,8 +243,7 @@ def get_real_match_stats(team1: str, team2: str, db: Session = Depends(get_db)):
         "goals": real_goals
     }
     
-    # Maintain inverse alignment structure logic
-    if match.team1 != team1:
+    if is_inverted:
         stats = {
             "possession": {"home": stats["possession"]["away"], "away": stats["possession"]["home"]},
             "xg": {"home": stats["xg"]["away"], "away": stats["xg"]["home"]},
