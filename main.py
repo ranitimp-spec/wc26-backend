@@ -134,17 +134,56 @@ def simulate_mythical_battle(request: ComparisonRequest):
     # Set up mode-specific labels
     if request.mode == "players":
         stats_labels = ["Pace", "Shooting", "Passing", "Dribbling", "Defence", "Physical"]
+        
+        # We teach the AI how to evaluate players realistically here
+        guidelines = (
+            "CRITICAL PLAYER EVALUATION RULES:\n"
+            "1. Base your scores and attributes on realistic, widely-accepted football consensus, peak career impact, individual accolades (Ballon d'Or, Golden Boy), and peak performance levels.\n"
+            "2. Under no circumstances should you swap player roles (e.g., do not praise a highly-ranked attacking winger like Lamine Yamal for 'defensive prowess', and do not make defensive players outscore offensive players in shooting unless they are legendary goalscoring defenders).\n"
+            "3. Be objective. If one player is globally regarded as a generation-defining talent (like Yamal) and the other is a standard elite player (like Garnacho), the scores, stats, and verdict must clearly reflect this hierarchy."
+        )
     else:
         stats_labels = ["Tactical Ability", "Firepower", "Defensive Solidity", "Midfield Control", "Team Chemistry", "Squad Depth"]
+        guidelines = (
+            "CRITICAL TEAM EVALUATION RULES:\n"
+            "1. Evaluate teams based on their historical legacy, silverware, tactical innovation, and squad cohesion.\n"
+            "2. Ensure the stats accurately represent how their manager set them up (e.g., Pep's Barca should have elite Midfield Control, Simeone's Atletico should have elite Defensive Solidity)."
+        )
 
-    # Structural prompt system that forces output matching exactly our keys
+    # We provide a "Few-Shot" example of what an elite analysis looks like
+    few_shot_example = ""
+    if request.mode == "players":
+        few_shot_example = (
+            "\nHere is an example of the quality and objectivity expected:\n"
+            "Query: 'Lamine Yamal vs Alejandro Garnacho'\n"
+            "Expected Output:\n"
+            "{\n"
+            "  \"verdict\": \"While both are elite young wingers, Lamine Yamal operates at a generational frequency, utilizing his superior playmaking, decision-making, and La Masia-honed spatial awareness to dictate play. Garnacho offers explosive, direct transitions and clinical box threat, but Yamal's world-class creative output and elite tournament pedigree give him a distinct edge.\",\n"
+            "  \"title1\": \"Lamine Yamal\",\n"
+            "  \"title2\": \"Alejandro Garnacho\",\n"
+            "  \"score1\": \"91\",\n"
+            "  \"score2\": \"83\",\n"
+            "  \"potm\": \"Lamine Yamal\",\n"
+            "  \"stats\": [\n"
+            "    {\"label\": \"Pace\", \"home\": 88, \"away\": 91},\n"
+            "    {\"label\": \"Shooting\", \"home\": 82, \"away\": 84},\n"
+            "    {\"label\": \"Passing\", \"home\": 89, \"away\": 76},\n"
+            "    {\"label\": \"Dribbling\", \"home\": 93, \"away\": 86},\n"
+            "    {\"label\": \"Defence\", \"home\": 45, \"away\": 40},\n"
+            "    {\"label\": \"Physical\", \"home\": 72, \"away\": 78}\n"
+            "  ]\n"
+            "}"
+        )
+
     system_prompt = (
-        "You are an elite football analytics engine specialized in historical mythical matchups.\n"
+        "You are an elite, highly-objective football analytics engine specialized in historical mythical matchups.\n"
         "You must simulate the requested confrontation and respond ONLY with a valid, raw JSON object matching the requested schema exactly.\n"
         "Do not include any markdown format tags, backticks, or text outside the JSON block.\n\n"
+        f"{guidelines}\n"
+        f"{few_shot_example}\n\n"
         "JSON Schema Requirement:\n"
         "{\n"
-        "  \"verdict\": \"A detailed 3-sentence expert breakdown detailing how this match/clash runs tactically in their absolute primes.\",\n"
+        "  \"verdict\": \"A detailed 3-sentence expert breakdown detailing how this match/clash runs tactically in their absolute primes, respecting realistic traits.\",\n"
         "  \"title1\": \"Formatted Name of Side A\",\n"
         "  \"title2\": \"Formatted Name of Side B\",\n"
         "  \"score1\": \"Numeric metric value (e.g., goals scored if teams, or overall composite rating out of 100 if players)\",\n"
@@ -173,6 +212,7 @@ def simulate_mythical_battle(request: ComparisonRequest):
     payload = {
         "model": "llama-3.3-70b-versatile",
         "response_format": {"type": "json_object"},
+        "temperature": 0.2,  # <-- Added low temperature to keep the AI analytical and objective
         "messages": [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt}
@@ -205,7 +245,8 @@ def chat_with_ai(request: ChatRequest, db: Session = Depends(get_db)):
 
     headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
     payload = {
-        "model": "llama-3.3-70b-versatile", 
+        "model": "llama-3.3-70b-versatile",
+        "temperature": 0.2,
         "messages": [
             {"role": "system", "content": f"You are GROQ-Tactical. Database:\n{tournament_context}"},
             {"role": "user", "content": request.message}
