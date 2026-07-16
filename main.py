@@ -35,7 +35,7 @@ app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["https://wc26-woad-six.vercel.app"],
+    allow_origins=["https://wc26-woad-six.vercel.app", "http://localhost:3000"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -118,150 +118,72 @@ def get_matches(db: Session = Depends(get_db)):
     return db.query(MatchDB).all()
 
 
-# --- STABLE HYBRID ENGINE: SIMULATED STATS + DYNAMIC REAL GOALSCORERS ---
-@app.get("/api/match-stats/{team1}/{team2}")
-def get_real_match_stats(team1: str, team2: str, db: Session = Depends(get_db)):
-    match = db.query(MatchDB).filter(
-        ((MatchDB.team1 == team1) & (MatchDB.team2 == team2)) |
-        ((MatchDB.team1 == team2) & (MatchDB.team2 == team1))
-    ).first()
+# --- AI MYTHICAL ARENA ENGINE ---
+class ComparisonRequest(BaseModel):
+    item1: str
+    item2: str
+    mode: str  # "teams" or "players"
 
-    if not match:
-        return {"error": True, "message": "Match not found in database records."}
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
 
-    home_score = match.score1 if match.score1 is not None else 0
-    away_score = match.score2 if match.score2 is not None else 0
+@app.post("/api/ai-compare")
+def simulate_mythical_battle(request: ComparisonRequest):
+    if not GROQ_API_KEY:
+        return {"error": True, "message": "Groq API key missing on the server environment."}
 
-    real_goals = []
-    detected_potm = "Match MVP"
-    
+    # Strict structural formatting system prompt forcing valid JSON responses
+    system_prompt = (
+        "You are an elite football analytics engine specialized in historical mythical matchups.\n"
+        "You must simulate the requested confrontation and respond ONLY with a valid, raw JSON object matching the requested schema exactly.\n"
+        "Do not include any markdown format tags, backticks, or text outside the JSON block.\n\n"
+        "JSON Schema Requirement:\n"
+        "{\n"
+        "  \"verdict\": \"A detailed 3-sentence expert breakdown detailing how this match/clash runs tactically in their absolute primes.\",\n"
+        "  \"title1\": \"Formatted Name of Side A\",\n"
+        "  \"title2\": \"Formatted Name of Side B\",\n"
+        "  \"score1\": \"Numeric metric value (e.g., goals scored if teams, or overall composite rating out of 100 if players)\",\n"
+        "  \"score2\": \"Numeric metric value (e.g., goals scored if teams, or overall composite rating out of 100 if players)\",\n"
+        "  \"potm\": \"Name of the standout individual performer or winner\",\n"
+        "  \"stats\": [\n"
+        "    {\"label\": \"Metric Label 1 (e.g., Tactical Control or Finishing Ability)\", \"home\": 60, \"away\": 40},\n"
+        "    {\"label\": \"Metric Label 2 (e.g., xG Created or Top Sprint Speed)\", \"home\": 75, \"away\": 82},\n"
+        "    {\"label\": \"Metric Label 3\", \"home\": 55, \"away\": 45},\n"
+        "    {\"label\": \"Metric Label 4\", \"home\": 90, \"away\": 88},\n"
+        "    {\"label\": \"Metric Label 5 (e.g., Aura & Clutch Factor)\", \"home\": 95, \"away\": 91}\n"
+        "  ]\n"
+        "}"
+    )
+
+    user_prompt = f"Simulate this mythical debate: {request.item1} versus {request.item2}. The operational simulation mode is '{request.mode}'."
+
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+        "Authorization": f"Bearer {GROQ_API_KEY}",
+        "Content-Type": "application/json"
     }
-
-    # 1. Parse date context window to safely balance international timezone rolls
-    try:
-        match_date = datetime.strptime(match.utc_date[:10], "%Y-%m-%d")
-        dates_to_check = [
-            (match_date - timedelta(days=1)).strftime("%Y%m%d"),
-            match_date.strftime("%Y%m%d"),
-            (match_date + timedelta(days=1)).strftime("%Y%m%d")
+    payload = {
+        "model": "llama-3.3-70b-versatile",
+        "response_format": {"type": "json_object"},
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt}
         ]
-    except Exception:
-        dates_to_check = [datetime.utcnow().strftime("%Y%m%d")]
-
-    fotmob_id = match.sofascore_id
-    is_inverted = False
-
-    # 2. Dynamic Calendar Matrix Scan (Only loops if the ID isn't cached yet)
-    if not fotmob_id:
-        for target_date in dates_to_check:
-            try:
-                url = f"https://www.fotmob.com/api/matches?date={target_date}"
-                res = requests.get(url, headers=headers, timeout=5)
-                if res.status_code == 200:
-                    day_data = res.json()
-                    for league in day_data.get("leagues", []):
-                        for m in league.get("matches", []):
-                            h_name = m.get("home", {}).get("name", "").lower().strip()
-                            a_name = m.get("away", {}).get("name", "").lower().strip()
-                            t1_low = team1.lower().strip()
-                            t2_low = team2.lower().strip()
-                            
-                            if (t1_low in h_name or h_name in t1_low) and (t2_low in a_name or a_name in t2_low):
-                                fotmob_id = str(m.get("id"))
-                                is_inverted = False
-                                break
-                            elif (t2_low in h_name or h_name in t2_low) and (t1_low in a_name or a_name in t1_low):
-                                fotmob_id = str(m.get("id"))
-                                is_inverted = True
-                                break
-                    if fotmob_id:
-                        match.sofascore_id = fotmob_id
-                        db.commit()
-                        break
-            except Exception:
-                continue
-
-    # 3. Pull Genuine Scorer Timeline Details
-    if fotmob_id:
-        try:
-            details_url = f"https://www.fotmob.com/api/matchDetails?matchId={fotmob_id}"
-            details_resp = requests.get(details_url, headers=headers, timeout=5)
-            
-            if details_resp.status_code == 200:
-                details_data = details_resp.json()
-                
-                # Re-verify alignment structure perspective
-                h_check = details_data.get("header", {}).get("teams", [{}, {}])[0].get("name", "").lower().strip()
-                if team2.lower().strip() in h_check or h_check in team2.lower().strip():
-                    is_inverted = True
-
-                # Extract live player performance MVP metadata
-                top_players = details_data.get("content", {}).get("matchFacts", {}).get("topPlayers", {})
-                h_potm = top_players.get("homePlayer", {}).get("name", "")
-                a_potm = top_players.get("awayPlayer", {}).get("name", "")
-                if h_potm or a_potm:
-                    detected_potm = h_potm if h_potm else a_potm
-                        
-                # Extract accurate goal scorer list
-                teams_header = details_data.get("header", {}).get("teams", [])
-                for team_entry in teams_header:
-                    for goal in team_entry.get("goalEvents", []):
-                        if not goal.get("isDisallowed", False):
-                            real_goals.append({
-                                "player": goal.get("name", "Player"),
-                                "time": goal.get("time", 45)
-                            })
-                real_goals = sorted(real_goals, key=lambda x: x["time"])
-        except Exception as e:
-            print(f"Goal feed processing warning: {e}")
-
-    # Fallback placeholder to maintain visual formatting if match hasn't started yet
-    if not real_goals and (home_score > 0 or away_score > 0):
-        for i in range(home_score):
-            real_goals.append({"player": f"{team1} Scorer", "time": 20 + (i * 20)})
-        for i in range(away_score):
-            real_goals.append({"player": f"{team2} Scorer", "time": 30 + (i * 20)})
-
-    # MADE UP STATS ENGINE: Generated mathematically derived from results to ensure zero failures
-    random.seed(home_score + away_score + len(team1))
-    
-    pos_h = max(38, min(62, 50 + (home_score - away_score) * 4 + random.randint(-2, 2)))
-    xg_h = max(0.2, (home_score * 0.65) + (random.randint(-10, 15) / 100.0))
-    xg_a = max(0.2, (away_score * 0.65) + (random.randint(-10, 15) / 100.0))
-    shots_h = max(home_score + 4, int(xg_h * 6) + random.randint(2, 5))
-    shots_a = max(away_score + 4, int(xg_a * 6) + random.randint(2, 5))
-
-    stats = {
-        "possession": {"home": pos_h, "away": 100 - pos_h},
-        "xg": {"home": f"{xg_h:.2f}", "away": f"{xg_a:.2f}"},
-        "shots": {"home": shots_h, "away": shots_a},
-        "shots_on_target": {"home": max(home_score, int(shots_h * 0.4)), "away": max(away_score, int(shots_a * 0.4))},
-        "chances_created": {"home": max(0, home_score + random.randint(0, 1)), "away": max(0, away_score + random.randint(0, 1))},
-        "potm": detected_potm,
-        "goals": real_goals
     }
-    
-    if is_inverted:
-        stats = {
-            "possession": {"home": stats["possession"]["away"], "away": stats["possession"]["home"]},
-            "xg": {"home": stats["xg"]["away"], "away": stats["xg"]["home"]},
-            "shots": {"home": stats["shots"]["away"], "away": stats["shots"]["home"]},
-            "shots_on_target": {"home": stats["shots_on_target"]["away"], "away": stats["shots_on_target"]["home"]},
-            "chances_created": {"home": stats["chances_created"]["away"], "away": stats["chances_created"]["home"]},
-            "potm": stats["potm"],
-            "goals": stats["goals"]
-        }
 
-    return {"error": False, "stats": stats}
+    try:
+        response = requests.post("https://api.groq.com/openai/v1/chat/completions", headers=headers, json=payload, timeout=12)
+        if response.status_code != 200:
+            return {"error": True, "message": f"Groq network error: {response.text}"}
+            
+        ai_content = response.json()["choices"][0]["message"]["content"]
+        parsed_data = json.loads(ai_content)
+        return {"error": False, "arena": parsed_data}
+    except Exception as e:
+        return {"error": True, "message": f"Simulation failure: {str(e)}"}
 
 
 # --- GROQ AI INTEGRATION (Tactical Coach) ---
 class ChatRequest(BaseModel):
     message: str
-
-GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
 
 @app.post("/api/chat")
 def chat_with_ai(request: ChatRequest, db: Session = Depends(get_db)):
