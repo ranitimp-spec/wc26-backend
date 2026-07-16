@@ -26,3 +26,4 @@ fastapi
 uvicorn
 requests
 playwright
+sqlalchemy
