@@ -117,100 +117,114 @@ def get_matches(db: Session = Depends(get_db)):
     return db.query(MatchDB).all()
 
 
-# --- REAL SOFASCORE INTERNAL API INTEGRATION ---
+# --- REAL MATCH STATS ENGINE (Via FotMob API Gateway) ---
 @app.get("/api/match-stats/{team1}/{team2}")
-def get_real_sofascore_stats(team1: str, team2: str, db: Session = Depends(get_db)):
+def get_real_match_stats(team1: str, team2: str, db: Session = Depends(get_db)):
+    match = db.query(MatchDB).filter(
+        ((MatchDB.team1 == team1) & (MatchDB.team2 == team2)) |
+        ((MatchDB.team1 == team2) & (MatchDB.team2 == team1))
+    ).first()
+
+    if not match:
+        return {"error": True, "message": "Match not found in local database."}
+
+    # Format date from match timeline to match YYYYMMDD string parameters
+    date_str = match.utc_date[:10].replace("-", "")
+    
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/117.0.0.0 Safari/537.36",
-        "Accept": "*/*",
-        "Origin": "https://www.sofascore.com",
-        "Referer": "https://www.sofascore.com/"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     }
 
     try:
-        # 1. Search Sofascore for the Match ID
-        search_url = f"https://api.sofascore.com/api/v1/search/all?q={team1}%20{team2}"
-        search_resp = requests.get(search_url, headers=headers)
-        if search_resp.status_code != 200:
-            return {"error": True, "message": "Failed to search Sofascore database."}
-            
-        search_data = search_resp.json()
-        match_id = None
+        # Step 1: Scan target matchday layout for the proper ID frame
+        day_url = f"https://www.fotmob.com/api/matches?date={date_str}"
+        day_resp = requests.get(day_url, headers=headers, timeout=8)
+        
+        fotmob_id = None
         is_inverted = False
         
-        for result in search_data.get("results", []):
-            if result.get("type") == "event":
-                entity = result.get("entity", {})
-                h_team = entity.get("homeTeam", {}).get("name", "")
-                a_team = entity.get("awayTeam", {}).get("name", "")
-                
-                # Check for direct match
-                if team1.lower() in h_team.lower() and team2.lower() in a_team.lower():
-                    match_id = entity.get("id")
-                    break
-                # Check for inverted match
-                elif team2.lower() in h_team.lower() and team1.lower() in a_team.lower():
-                    match_id = entity.get("id")
-                    is_inverted = True
-                    break
+        if day_resp.status_code == 200:
+            day_data = day_resp.json()
+            # Iterate through available league configurations
+            for league in day_data.get("leagues", []):
+                for m in league.get("matches", []):
+                    h_name = m.get("home", {}).get("name", "").lower()
+                    a_name = m.get("away", {}).get("name", "").lower()
                     
-        if not match_id:
-            return {"error": True, "message": "Exact match not found on Sofascore."}
+                    if team1.lower() in h_name and team2.lower() in a_name:
+                        fotmob_id = m.get("id")
+                        break
+                    elif team2.lower() in h_name and team1.lower() in a_name:
+                        fotmob_id = m.get("id")
+                        is_inverted = True
+                        break
+                        
+        if not fotmob_id:
+            return {"error": True, "message": f"Real-time analytics path unavailable for {team1} vs {team2}."}
+
+        # Step 2: Grab full details directly from the computed entry layout
+        details_url = f"https://www.fotmob.com/api/matchDetails?matchId={fotmob_id}"
+        details_resp = requests.get(details_url, headers=headers, timeout=8)
+        
+        if details_resp.status_code != 200:
+            return {"error": True, "message": "Failed to pull match analytics data profile."}
             
-        # 2. Fetch Real Statistics 
-        stats_url = f"https://api.sofascore.com/api/v1/event/{match_id}/statistics"
-        stats_resp = requests.get(stats_url, headers=headers)
-        stats_data = stats_resp.json() if stats_resp.status_code == 200 else {}
+        data = details_resp.json()
         
-        # 3. Fetch Real Incidents (Goals/Cards)
-        incidents_url = f"https://api.sofascore.com/api/v1/event/{match_id}/incidents"
-        incidents_resp = requests.get(incidents_url, headers=headers)
-        incidents_data = incidents_resp.json() if incidents_resp.status_code == 200 else {}
-        
-        # Build Standardized Data Object
+        # Base setup defaults
         parsed_stats = {
             "possession": {"home": 50, "away": 50},
             "xg": {"home": "0.00", "away": "0.00"},
             "shots": {"home": 0, "away": 0},
             "shots_on_target": {"home": 0, "away": 0},
             "chances_created": {"home": 0, "away": 0},
-            "potm": "See Official App",
+            "potm": "Unavailable",
             "goals": []
         }
-        
-        # Process Stats
-        statistics = stats_data.get("statistics", [])
-        if statistics:
-            for group in statistics[0].get("groups", []):
-                for item in group.get("statisticsItems", []):
-                    name = item.get("name")
-                    h_val = item.get("home")
-                    a_val = item.get("away")
-                    
-                    if name == "Ball possession":
-                        parsed_stats["possession"]["home"] = int(str(h_val).replace('%', ''))
-                        parsed_stats["possession"]["away"] = int(str(a_val).replace('%', ''))
-                    elif name == "Expected goals":
-                        parsed_stats["xg"]["home"] = str(h_val)
-                        parsed_stats["xg"]["away"] = str(a_val)
-                    elif name == "Total shots":
-                        parsed_stats["shots"]["home"] = int(h_val)
-                        parsed_stats["shots"]["away"] = int(a_val)
-                    elif name == "Shots on target":
-                        parsed_stats["shots_on_target"]["home"] = int(h_val)
-                        parsed_stats["shots_on_target"]["away"] = int(a_val)
-                    elif name == "Big chances":
-                        parsed_stats["chances_created"]["home"] = int(h_val)
-                        parsed_stats["chances_created"]["away"] = int(a_val)
-                        
-        # Process Goals
-        for incident in incidents_data.get("incidents", []):
-            if incident.get("incidentType") == "goal":
-                player_name = incident.get("player", {}).get("name", "Unknown")
-                time = incident.get("time", 0)
-                parsed_stats["goals"].append({"player": player_name, "time": time})
 
-        # Invert data smoothly if the UI requested it backwards
+        # Pull match events directly
+        content = data.get("content", {})
+        
+        # Parse official player performance evaluation structures
+        top_players = content.get("matchFacts", {}).get("topPlayers", {})
+        home_potm = top_players.get("homePlayer", {}).get("name", "")
+        away_potm = top_players.get("awayPlayer", {}).get("name", "")
+        parsed_stats["potm"] = home_potm if home_potm else (away_potm if away_potm else "Unavailable")
+
+        # Parse goals data with absolute accuracy
+        for event in data.get("header", {}).get("teams", []):
+            for g in event.get("goalEvents", []):
+                parsed_stats["goals"].append({
+                    "player": g.get("name", "Unknown Player"),
+                    "time": g.get("time", 0)
+                })
+
+        # Process team statistic metrics grid arrays
+        stats_groups = content.get("stats", {}).get("stats", [])
+        if stats_groups:
+            # Look inside the first layout group tab matrix
+            stats_list = stats_groups[0].get("stats", [])
+            for stat in stats_list:
+                title = stat.get("title")
+                stats_val = stat.get("stats", [0, 0])
+                
+                if title == "Ball possession":
+                    parsed_stats["possession"]["home"] = int(stats_val[0])
+                    parsed_stats["possession"]["away"] = int(stats_val[1])
+                elif title == "Expected goals (xG)":
+                    parsed_stats["xg"]["home"] = str(stats_val[0])
+                    parsed_stats["xg"]["away"] = str(stats_val[1])
+                elif title == "Total shots":
+                    parsed_stats["shots"]["home"] = int(stats_val[0])
+                    parsed_stats["shots"]["away"] = int(stats_val[1])
+                elif title == "Shots on target":
+                    parsed_stats["shots_on_target"]["home"] = int(stats_val[0])
+                    parsed_stats["shots_on_target"]["away"] = int(stats_val[1])
+                elif title == "Big chances":
+                    parsed_stats["chances_created"]["home"] = int(stats_val[0])
+                    parsed_stats["chances_created"]["away"] = int(stats_val[1])
+
+        # Safely mirror dimensions dynamically if inverted matching occurred
         if is_inverted:
             swapped_stats = {
                 "possession": {"home": parsed_stats["possession"]["away"], "away": parsed_stats["possession"]["home"]},
@@ -226,12 +240,14 @@ def get_real_sofascore_stats(team1: str, team2: str, db: Session = Depends(get_d
         return {"error": False, "stats": parsed_stats}
 
     except Exception as e:
-        return {"error": True, "message": f"Real API Fetch Error: {str(e)}"}
+        return {"error": True, "message": f"Global Analytics Engine Error: {str(e)}"}
 
 
 # --- GROQ AI INTEGRATION (Tactical Coach) ---
 class ChatRequest(BaseModel):
     message: str
+
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
 
 @app.post("/api/chat")
 def chat_with_ai(request: ChatRequest, db: Session = Depends(get_db)):
@@ -245,7 +261,6 @@ def chat_with_ai(request: ChatRequest, db: Session = Depends(get_db)):
             score_str = f"{m.score1}-{m.score2}" if (m.score1 is not None and m.score2 is not None) else "Not Played Yet"
             tournament_context += f"- Stage: {m.stage} | Match: {m.team1} vs {m.team2} | Score: {score_str} | Status: {m.status}\n"
 
-    GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
     headers = {
         "Authorization": f"Bearer {GROQ_API_KEY}",
         "Content-Type": "application/json"
