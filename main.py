@@ -35,8 +35,7 @@ app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
-    # Added https:// here! (And make sure there is no trailing slash at the end)
-    allow_origins=["*"],
+    allow_origins=["https://wc26-woad-six.vercel.app"],  # Your explicit frontend URL
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -216,7 +215,7 @@ class ChatRequest(BaseModel):
     message: str
 
 # TODO: PASTE YOUR REAL GROQ API KEY HERE!
-GROK_API_KEY = os.environ.get("GROK_API_KEY", "")
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
 
 @app.post("/api/chat")
 def chat_with_ai(request: ChatRequest):
