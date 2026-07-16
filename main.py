@@ -131,14 +131,11 @@ def simulate_mythical_battle(request: ComparisonRequest):
     if not GROQ_API_KEY:
         return {"error": True, "message": "Groq API key missing on the server environment."}
 
-    # Explicitly configure the 5 metrics requested by the user
-    stats_labels = [
-        "Tactical Ability",
-        "Firepower",
-        "Defensive Strength",
-        "Midfield",
-        "Chemistry"
-    ]
+    # Set up mode-specific labels
+    if request.mode == "players":
+        stats_labels = ["Pace", "Shooting", "Passing", "Dribbling", "Defence", "Physical"]
+    else:
+        stats_labels = ["Tactical Ability", "Firepower", "Defensive Solidity", "Midfield Control", "Team Chemistry", "Squad Depth"]
 
     # Structural prompt system that forces output matching exactly our keys
     system_prompt = (
@@ -158,11 +155,12 @@ def simulate_mythical_battle(request: ComparisonRequest):
         f"    {{\"label\": \"{stats_labels[1]}\", \"home\": 78, \"away\": 82}},\n"
         f"    {{\"label\": \"{stats_labels[2]}\", \"home\": 80, \"away\": 75}},\n"
         f"    {{\"label\": \"{stats_labels[3]}\", \"home\": 72, \"away\": 88}},\n"
-        f"    {{\"label\": \"{stats_labels[4]}\", \"home\": 90, \"away\": 95}}\n"
+        f"    {{\"label\": \"{stats_labels[4]}\", \"home\": 90, \"away\": 95}},\n"
+        f"    {{\"label\": \"{stats_labels[5]}\", \"home\": 85, \"away\": 88}}\n"
         "  ]\n"
         "}\n\n"
-        f"CRUCIAL: You MUST strictly use the exact 5 labels in the 'stats' array: "
-        f"'{stats_labels[0]}', '{stats_labels[1]}', '{stats_labels[2]}', '{stats_labels[3]}', and '{stats_labels[4]}'. "
+        f"CRUCIAL: You MUST strictly use the exact 6 labels in the 'stats' array: "
+        f"'{stats_labels[0]}', '{stats_labels[1]}', '{stats_labels[2]}', '{stats_labels[3]}', '{stats_labels[4]}', and '{stats_labels[5]}'. "
         "For each metric, assign realistic integer attributes (0-100) representing their respective tactical strengths in that area."
     )
 
