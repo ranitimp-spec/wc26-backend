@@ -99,7 +99,6 @@ def get_matches(db: Session = Depends(get_db)):
 # --- AUTOMATED PLAYWRIGHT SCRAPERS (Deep Match Stats) ---
 def scrape_match_data_playwright(team1: str, team2: str, utc_date: str, existing_id: str = None):
     with sync_playwright() as p:
-        # STEALTH HEADLESS: Runs invisibly but hides the bot flags from Cloudflare
         browser = p.chromium.launch(
             headless=True,
             args=[
@@ -114,7 +113,6 @@ def scrape_match_data_playwright(team1: str, team2: str, utc_date: str, existing
             current_id = existing_id
             
             if not current_id:
-                # Step 1: Search for team1 to find its Sofascore entity ID
                 encoded_query = urllib.parse.quote(team1)
                 search_url = f"https://api.sofascore.com/api/v1/search/all?q={encoded_query}&page=0"
                 
@@ -128,7 +126,6 @@ def scrape_match_data_playwright(team1: str, team2: str, utc_date: str, existing
                         team_id = str(result.get('entity', {}).get('id'))
                         break
                 
-                # Step 2: Query fixtures and filter by date alignment to find the exact target match
                 if team_id:
                     events_urls = [
                         f"https://api.sofascore.com/api/v1/team/{team_id}/events/last/0",
@@ -145,9 +142,7 @@ def scrape_match_data_playwright(team1: str, team2: str, utc_date: str, existing
                                 home_name = event.get('homeTeam', {}).get('name', '').lower()
                                 away_name = event.get('awayTeam', {}).get('name', '').lower()
                                 
-                                # Verify team composition matches
                                 if team2.lower() in home_name or team2.lower() in away_name:
-                                    # Validate date proximity (within 1 day tolerance for timezones)
                                     start_timestamp = event.get('startTimestamp')
                                     if start_timestamp and utc_date:
                                         sofa_date = datetime.fromtimestamp(start_timestamp).date()
@@ -189,7 +184,6 @@ def get_live_sofascore_stats(team1: str, team2: str, db: Session = Depends(get_d
     if not match:
         return {"error": True, "message": "Match not found in local database."}
 
-    # Added match.utc_date down to the scraper function for strict scheduling evaluation
     new_id, scraped_data = scrape_match_data_playwright(team1, team2, match.utc_date, match.sofascore_id)
     
     if scraped_data.get('error'):
@@ -252,7 +246,18 @@ class ChatRequest(BaseModel):
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
 
 @app.post("/api/chat")
-def chat_with_ai(request: ChatRequest):
+def chat_with_ai(request: ChatRequest, db: Session = Depends(get_db)):
+    # 1. Fetch live match data from your synchronized database
+    db_matches = db.query(MatchDB).all()
+    
+    # 2. Build a comprehensive string context describing the current state of the tournament
+    tournament_context = "CURRENT LIVE 2026 WORLD CUP DATABASE MATCH CONTEXT:\n"
+    if not db_matches:
+        tournament_context += "No match data synchronized in database yet.\n"
+    else:
+        for m in db_matches:
+            tournament_context += f"- Stage: {m.stage} | Match: {m.team1} vs {m.team2} | Score: {m.score1}-{m.score2} | Status: {m.status}\n"
+
     headers = {
         "Authorization": f"Bearer {GROQ_API_KEY}",
         "Content-Type": "application/json"
@@ -263,7 +268,7 @@ def chat_with_ai(request: ChatRequest):
         "messages": [
             {
                 "role": "system", 
-                "content": """You are GROQ-Tactical, a highly advanced, robotic football analyst AI. You speak with a clinical, tactical, and slightly robotic tone. 
+                "content": f"""You are GROQ-Tactical, a highly advanced, robotic football analyst AI. You speak with a clinical, tactical, and slightly robotic tone. 
                 
 CRITICAL DIRECTIVE: When a user asks for a PREDICTION about a match or tournament, you MUST generate a heavily detailed, multi-tiered analysis in the following format:
 **TACTICAL MATCHUP:** Break down the formations and styles of play.
@@ -271,7 +276,10 @@ CRITICAL DIRECTIVE: When a user asks for a PREDICTION about a match or tournamen
 **WIN PROBABILITY:** Give exact percentages (e.g., Team A: 45%, Draw: 25%, Team B: 30%).
 **PREDICTED SCORELINE:** Give your exact final score prediction with a brief robotic justification.
 
-If they are not asking for a prediction, provide deep, analytical football insight in a concise manner."""
+If they are not asking for a prediction, provide deep, analytical football insight in a concise manner.
+
+You have access to the live tournament database. Use this data to accurately answer questions about current teams, who is playing, scores, or tournament progress:
+{tournament_context}"""
             },
             {
                 "role": "user", 
