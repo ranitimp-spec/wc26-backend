@@ -1,5 +1,4 @@
 import os
-import urllib.parse
 import json
 from datetime import datetime, timedelta
 from fastapi import FastAPI, Depends
@@ -118,101 +117,116 @@ def get_matches(db: Session = Depends(get_db)):
     return db.query(MatchDB).all()
 
 
-# --- DYNAMIC AI MATCH STATS ENGINE (With Strict 2026 Grounding) ---
+# --- REAL SOFASCORE INTERNAL API INTEGRATION ---
 @app.get("/api/match-stats/{team1}/{team2}")
-def get_live_sofascore_stats(team1: str, team2: str, db: Session = Depends(get_db)):
-    match = db.query(MatchDB).filter(
-        ((MatchDB.team1 == team1) & (MatchDB.team2 == team2)) |
-        ((MatchDB.team1 == team2) & (MatchDB.team2 == team1))
-    ).first()
-
-    if not match:
-        return {"error": True, "message": "Match not found in local database."}
-
-    is_inverted = (match.team1 != team1)
-    home_team = match.team1
-    away_team = match.team2
-    home_score = match.score1 if match.score1 is not None else 0
-    away_score = match.score2 if match.score2 is not None else 0
-
-    GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
-    if not GROQ_API_KEY:
-        return {"error": True, "message": "Groq API token configuration missing on server."}
-
+def get_real_sofascore_stats(team1: str, team2: str, db: Session = Depends(get_db)):
     headers = {
-        "Authorization": f"Bearer {GROQ_API_KEY}",
-        "Content-Type": "application/json"
-    }
-    
-    # Enforced 2026 timeline parameters with explicit whitelists & blacklists
-    prompt = (
-        f"It is the current year 2026. Generate a highly realistic tactical match statistics profile and goal events "
-        f"for a 2026 World Cup fixture where {home_team} played at home against {away_team} away. "
-        f"The verified final score line was: {home_team} {home_score} - {away_score} {away_team}. "
-        f"\n\nCRITICAL TIMELINE CONSTRAINTS:\n"
-        f"1. The goals array object MUST contain EXACTLY {home_score} goal(s) scored by current, active 2026 roster players from {home_team} "
-        f"and EXACTLY {away_score} goal(s) scored by current, active 2026 roster players from {away_team}.\n"
-        f"2. ABSOLUTELY FORBIDDEN: Do not use any players who retired from international football prior to 2026. For example, "
-        f"Angel Di Maria, Eden Hazard, Toni Kroos, Gareth Bale, and Thiago Silva are STRICTLY FORBIDDEN.\n"
-        f"3. ROSTER ANCHORS: Only pick from highly plausible active elite players. For example:\n"
-        f"   - Argentina: Lionel Messi, Julián Álvarez, Lautaro Martínez, Alexis Mac Allister, Enzo Fernández, Alejandro Garnacho, Rodrigo De Paul.\n"
-        f"   - England: Harry Kane, Jude Bellingham, Bukayo Saka, Phil Foden, Cole Palmer, Ollie Watkins, Declan Rice.\n"
-        f"   - France: Kylian Mbappé, Marcus Thuram, Ousmane Dembélé, Bradley Barcola, Antoine Griezmann.\n"
-        f"   - Spain: Lamine Yamal, Nico Williams, Dani Olmo, Álvaro Morata, Pedri, Gavi.\n"
-        f"Ensure all simulated metrics (possession splits, xG values, shot counts, and POTM) match the intensity of this specific scoreline."
-    )
-
-    payload = {
-        "model": "llama-3.3-70b-versatile",
-        "response_format": {"type": "json_object"},
-        "messages": [
-            {
-                "role": "system",
-                "content": (
-                    "You are an elite, highly precise football analytics data engine. Your sole purpose is to synthesize "
-                    "incredibly authentic statistical summaries for completed matches. You must output exclusively a valid "
-                    "JSON object matching this strict layout with no markdown formatting tags, explanation text, or extra characters:\n"
-                    "{\n"
-                    "  \"possession\": {\"home\": 52, \"away\": 48},\n"
-                    "  \"xg\": {\"home\": \"1.42\", \"away\": \"1.10\"},\n"
-                    "  \"shots\": {\"home\": 12, \"away\": 9},\n"
-                    "  \"shots_on_target\": {\"home\": 5, \"away\": 3},\n"
-                    "  \"chances_created\": {\"home\": 2, \"away\": 2},\n"
-                    "  \"potm\": \"Player Name\",\n"
-                    "  \"goals\": [{\"player\": \"Player Name\", \"time\": 42}]\n"
-                    "}"
-                )
-            },
-            {
-                "role": "user",
-                "content": prompt
-            }
-        ]
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/117.0.0.0 Safari/537.36",
+        "Accept": "*/*",
+        "Origin": "https://www.sofascore.com",
+        "Referer": "https://www.sofascore.com/"
     }
 
     try:
-        response = requests.post("https://api.groq.com/openai/v1/chat/completions", headers=headers, json=payload)
-        if response.status_code == 200:
-            ai_data = response.json()
-            stats_json = json.loads(ai_data["choices"][0]["message"]["content"])
+        # 1. Search Sofascore for the Match ID
+        search_url = f"https://api.sofascore.com/api/v1/search/all?q={team1}%20{team2}"
+        search_resp = requests.get(search_url, headers=headers)
+        if search_resp.status_code != 200:
+            return {"error": True, "message": "Failed to search Sofascore database."}
             
-            if is_inverted:
-                swapped_stats = {
-                    "possession": {"home": stats_json["possession"]["away"], "away": stats_json["possession"]["home"]},
-                    "xg": {"home": stats_json["xg"]["away"], "away": stats_json["xg"]["home"]},
-                    "shots": {"home": stats_json["shots"]["away"], "away": stats_json["shots"]["home"]},
-                    "shots_on_target": {"home": stats_json["shots_on_target"]["away"], "away": stats_json["shots_on_target"]["home"]},
-                    "chances_created": {"home": stats_json["chances_created"]["away"], "away": stats_json["chances_created"]["home"]},
-                    "potm": stats_json.get("potm", "Unavailable"),
-                    "goals": stats_json.get("goals", [])
-                }
-                return {"error": False, "stats": swapped_stats}
+        search_data = search_resp.json()
+        match_id = None
+        is_inverted = False
+        
+        for result in search_data.get("results", []):
+            if result.get("type") == "event":
+                entity = result.get("entity", {})
+                h_team = entity.get("homeTeam", {}).get("name", "")
+                a_team = entity.get("awayTeam", {}).get("name", "")
                 
-            return {"error": False, "stats": stats_json}
-        else:
-            return {"error": True, "message": f"AI Engine configuration error: Status {response.status_code}"}
+                # Check for direct match
+                if team1.lower() in h_team.lower() and team2.lower() in a_team.lower():
+                    match_id = entity.get("id")
+                    break
+                # Check for inverted match
+                elif team2.lower() in h_team.lower() and team1.lower() in a_team.lower():
+                    match_id = entity.get("id")
+                    is_inverted = True
+                    break
+                    
+        if not match_id:
+            return {"error": True, "message": "Exact match not found on Sofascore."}
+            
+        # 2. Fetch Real Statistics 
+        stats_url = f"https://api.sofascore.com/api/v1/event/{match_id}/statistics"
+        stats_resp = requests.get(stats_url, headers=headers)
+        stats_data = stats_resp.json() if stats_resp.status_code == 200 else {}
+        
+        # 3. Fetch Real Incidents (Goals/Cards)
+        incidents_url = f"https://api.sofascore.com/api/v1/event/{match_id}/incidents"
+        incidents_resp = requests.get(incidents_url, headers=headers)
+        incidents_data = incidents_resp.json() if incidents_resp.status_code == 200 else {}
+        
+        # Build Standardized Data Object
+        parsed_stats = {
+            "possession": {"home": 50, "away": 50},
+            "xg": {"home": "0.00", "away": "0.00"},
+            "shots": {"home": 0, "away": 0},
+            "shots_on_target": {"home": 0, "away": 0},
+            "chances_created": {"home": 0, "away": 0},
+            "potm": "See Official App",
+            "goals": []
+        }
+        
+        # Process Stats
+        statistics = stats_data.get("statistics", [])
+        if statistics:
+            for group in statistics[0].get("groups", []):
+                for item in group.get("statisticsItems", []):
+                    name = item.get("name")
+                    h_val = item.get("home")
+                    a_val = item.get("away")
+                    
+                    if name == "Ball possession":
+                        parsed_stats["possession"]["home"] = int(str(h_val).replace('%', ''))
+                        parsed_stats["possession"]["away"] = int(str(a_val).replace('%', ''))
+                    elif name == "Expected goals":
+                        parsed_stats["xg"]["home"] = str(h_val)
+                        parsed_stats["xg"]["away"] = str(a_val)
+                    elif name == "Total shots":
+                        parsed_stats["shots"]["home"] = int(h_val)
+                        parsed_stats["shots"]["away"] = int(a_val)
+                    elif name == "Shots on target":
+                        parsed_stats["shots_on_target"]["home"] = int(h_val)
+                        parsed_stats["shots_on_target"]["away"] = int(a_val)
+                    elif name == "Big chances":
+                        parsed_stats["chances_created"]["home"] = int(h_val)
+                        parsed_stats["chances_created"]["away"] = int(a_val)
+                        
+        # Process Goals
+        for incident in incidents_data.get("incidents", []):
+            if incident.get("incidentType") == "goal":
+                player_name = incident.get("player", {}).get("name", "Unknown")
+                time = incident.get("time", 0)
+                parsed_stats["goals"].append({"player": player_name, "time": time})
+
+        # Invert data smoothly if the UI requested it backwards
+        if is_inverted:
+            swapped_stats = {
+                "possession": {"home": parsed_stats["possession"]["away"], "away": parsed_stats["possession"]["home"]},
+                "xg": {"home": parsed_stats["xg"]["away"], "away": parsed_stats["xg"]["home"]},
+                "shots": {"home": parsed_stats["shots"]["away"], "away": parsed_stats["shots"]["home"]},
+                "shots_on_target": {"home": parsed_stats["shots_on_target"]["away"], "away": parsed_stats["shots_on_target"]["home"]},
+                "chances_created": {"home": parsed_stats["chances_created"]["away"], "away": parsed_stats["chances_created"]["home"]},
+                "potm": parsed_stats["potm"],
+                "goals": parsed_stats["goals"]
+            }
+            return {"error": False, "stats": swapped_stats}
+
+        return {"error": False, "stats": parsed_stats}
+
     except Exception as e:
-        return {"error": True, "message": f"Failed to compute match analytics frame: {str(e)}"}
+        return {"error": True, "message": f"Real API Fetch Error: {str(e)}"}
 
 
 # --- GROQ AI INTEGRATION (Tactical Coach) ---
