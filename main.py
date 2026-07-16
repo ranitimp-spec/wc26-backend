@@ -131,7 +131,16 @@ def simulate_mythical_battle(request: ComparisonRequest):
     if not GROQ_API_KEY:
         return {"error": True, "message": "Groq API key missing on the server environment."}
 
-    # Strict structural formatting system prompt forcing valid JSON responses
+    # Explicitly configure the 5 metrics requested by the user
+    stats_labels = [
+        "Tactical Ability",
+        "Firepower",
+        "Defensive Strength",
+        "Midfield",
+        "Chemistry"
+    ]
+
+    # Structural prompt system that forces output matching exactly our keys
     system_prompt = (
         "You are an elite football analytics engine specialized in historical mythical matchups.\n"
         "You must simulate the requested confrontation and respond ONLY with a valid, raw JSON object matching the requested schema exactly.\n"
@@ -145,13 +154,16 @@ def simulate_mythical_battle(request: ComparisonRequest):
         "  \"score2\": \"Numeric metric value (e.g., goals scored if teams, or overall composite rating out of 100 if players)\",\n"
         "  \"potm\": \"Name of the standout individual performer or winner\",\n"
         "  \"stats\": [\n"
-        "    {\"label\": \"Metric Label 1 (e.g., Tactical Control or Finishing Ability)\", \"home\": 60, \"away\": 40},\n"
-        "    {\"label\": \"Metric Label 2 (e.g., xG Created or Top Sprint Speed)\", \"home\": 75, \"away\": 82},\n"
-        "    {\"label\": \"Metric Label 3\", \"home\": 55, \"away\": 45},\n"
-        "    {\"label\": \"Metric Label 4\", \"home\": 90, \"away\": 88},\n"
-        "    {\"label\": \"Metric Label 5 (e.g., Aura & Clutch Factor)\", \"home\": 95, \"away\": 91}\n"
+        f"    {{\"label\": \"{stats_labels[0]}\", \"home\": 85, \"away\": 90}},\n"
+        f"    {{\"label\": \"{stats_labels[1]}\", \"home\": 78, \"away\": 82}},\n"
+        f"    {{\"label\": \"{stats_labels[2]}\", \"home\": 80, \"away\": 75}},\n"
+        f"    {{\"label\": \"{stats_labels[3]}\", \"home\": 72, \"away\": 88}},\n"
+        f"    {{\"label\": \"{stats_labels[4]}\", \"home\": 90, \"away\": 95}}\n"
         "  ]\n"
-        "}"
+        "}\n\n"
+        f"CRUCIAL: You MUST strictly use the exact 5 labels in the 'stats' array: "
+        f"'{stats_labels[0]}', '{stats_labels[1]}', '{stats_labels[2]}', '{stats_labels[3]}', and '{stats_labels[4]}'. "
+        "For each metric, assign realistic integer attributes (0-100) representing their respective tactical strengths in that area."
     )
 
     user_prompt = f"Simulate this mythical debate: {request.item1} versus {request.item2}. The operational simulation mode is '{request.mode}'."
